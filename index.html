@@ -1,0 +1,249 @@
+<html lang="en">
+<head>
+    <title>three.js webgpu - Flocking Birds</title>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, user-scalable=no, minimum-scale=1.0, maximum-scale=1.0">
+    <style>
+        body { margin: 0; }
+        #info {
+            position: absolute;
+            top: 10px;
+            width: 100%;
+            text-align: center;
+            color: white;
+            font-family: monospace;
+            pointer-events: none;
+        }
+        canvas { width: 100%; height: 100% }
+    </style>
+</head>
+<body>
+    <div id="info">three.js webgpu - flocking birds<br/>Move your mouse to influence the flock</div>
+
+    <script type="importmap">
+        {
+            "imports": {
+                "three": "../build/three.webgpu.js",
+                "three/tsl": "../build/three.webgpu.js",
+                "three/addons/": "./jsm/"
+            }
+        }
+    </script>
+
+    <script type="module">
+        import * as THREE from 'three';
+        import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+        import { GUI } from 'three/addons/libs/lil-gui.module.min.js';
+        import { range, uniform, time, positionLocal } from 'three/tsl';
+
+        let camera, scene, renderer;
+        let controls;
+        let birds = [];
+        const BIRD_COUNT = 500;
+        const BOUNDS = 800;
+        let mouse = new THREE.Vector3(0, 0, 0);
+
+        // Simulation parameters
+        const params = {
+            separation: 20,
+            alignment: 20,
+            cohesion: 20,
+            freedom: 0.75,
+            speed: 4.0
+        };
+
+        init();
+        animate();
+
+        function init() {
+            const { innerWidth, innerHeight } = window;
+
+            // Scene setup
+            scene = new THREE.Scene();
+            scene.background = new THREE.Color(0x23282E);
+            scene.fog = new THREE.Fog(0x23282E, 100, 1000);
+
+            // Camera setup
+            camera = new THREE.PerspectiveCamera(75, innerWidth / innerHeight, 1, 3000);
+            camera.position.set(0, 350, 700);
+
+            // Create bird geometry
+            const birdGeometry = new THREE.ConeGeometry(5, 20, 5);
+            birdGeometry.rotateX(Math.PI / 2);
+
+            // Create birds
+            for (let i = 0; i < BIRD_COUNT; i++) {
+                const material = new THREE.MeshPhongMaterial({
+                    color: new THREE.Color(Math.random() * 0.2 + 0.5, Math.random() * 0.2 + 0.5, 1),
+                    side: THREE.DoubleSide
+                });
+
+                const bird = new THREE.Mesh(birdGeometry, material);
+                bird.position.set(
+                    Math.random() * BOUNDS - BOUNDS/2,
+                    Math.random() * BOUNDS - BOUNDS/2,
+                    Math.random() * BOUNDS - BOUNDS/2
+                );
+                bird.velocity = new THREE.Vector3(
+                    Math.random() - 0.5,
+                    Math.random() - 0.5,
+                    Math.random() - 0.5
+                );
+                bird.acceleration = new THREE.Vector3();
+
+                birds.push(bird);
+                scene.add(bird);
+            }
+
+            // Lighting
+            const ambientLight = new THREE.AmbientLight(0x666666);
+            scene.add(ambientLight);
+
+            const directionalLight = new THREE.DirectionalLight(0xffffff, 1);
+            directionalLight.position.set(1, 1, 1);
+            scene.add(directionalLight);
+
+            // Renderer setup
+            renderer = new THREE.WebGPURenderer({ antialias: true });
+            renderer.setSize(innerWidth, innerHeight);
+            document.body.appendChild(renderer.domElement);
+
+            // Controls
+            controls = new OrbitControls(camera, renderer.domElement);
+            controls.enableDamping = true;
+            controls.dampingFactor = 0.05;
+            controls.minDistance = 100;
+            controls.maxDistance = 1000;
+
+            // GUI
+            const gui = new GUI();
+            gui.add(params, 'separation', 0, 100, 1).name('Separation');
+            gui.add(params, 'alignment', 0, 100, 1).name('Alignment');
+            gui.add(params, 'cohesion', 0, 100, 1).name('Cohesion');
+            gui.add(params, 'freedom', 0, 1, 0.1).name('Freedom');
+            gui.add(params, 'speed', 0, 10, 0.1).name('Speed');
+
+            // Event listeners
+            window.addEventListener('resize', onWindowResize);
+            document.addEventListener('mousemove', onMouseMove);
+        }
+
+        function onWindowResize() {
+            const { innerWidth, innerHeight } = window;
+            camera.aspect = innerWidth / innerHeight;
+            camera.updateProjectionMatrix();
+            renderer.setSize(innerWidth, innerHeight);
+        }
+
+        function onMouseMove(event) {
+            const vector = new THREE.Vector3(
+                (event.clientX / window.innerWidth) * 2 - 1,
+                -(event.clientY / window.innerHeight) * 2 + 1,
+                0.5
+            );
+            vector.unproject(camera);
+            const dir = vector.sub(camera.position).normalize();
+            const distance = -camera.position.y / dir.y;
+            mouse.copy(camera.position).add(dir.multiplyScalar(distance));
+        }
+
+        function updateBird(bird, delta) {
+            // Apply flocking rules
+            const separation = new THREE.Vector3();
+            const alignment = new THREE.Vector3();
+            const cohesion = new THREE.Vector3();
+            let separationCount = 0;
+            let alignmentCount = 0;
+            let cohesionCount = 0;
+
+            // Check against other birds
+            birds.forEach(other => {
+                if (other !== bird) {
+                    const distance = bird.position.distanceTo(other.position);
+
+                    // Separation
+                    if (distance < params.separation) {
+                        const diff = bird.position.clone().sub(other.position);
+                        diff.normalize().divideScalar(distance);
+                        separation.add(diff);
+                        separationCount++;
+                    }
+
+                    // Alignment
+                    if (distance < params.alignment) {
+                        alignment.add(other.velocity);
+                        alignmentCount++;
+                    }
+
+                    // Cohesion
+                    if (distance < params.cohesion) {
+                        cohesion.add(other.position);
+                        cohesionCount++;
+                    }
+                }
+            });
+
+            // Apply separation
+            if (separationCount > 0) {
+                separation.divideScalar(separationCount);
+                separation.multiplyScalar(0.1);
+                bird.acceleration.add(separation);
+            }
+
+            // Apply alignment
+            if (alignmentCount > 0) {
+                alignment.divideScalar(alignmentCount);
+                alignment.sub(bird.velocity);
+                alignment.multiplyScalar(0.05);
+                bird.acceleration.add(alignment);
+            }
+
+            // Apply cohesion
+            if (cohesionCount > 0) {
+                cohesion.divideScalar(cohesionCount);
+                cohesion.sub(bird.position);
+                cohesion.multiplyScalar(0.01);
+                bird.acceleration.add(cohesion);
+            }
+
+            // Mouse influence
+            const mouseInfluence = mouse.clone().sub(bird.position);
+            const mouseDistance = mouseInfluence.length();
+            if (mouseDistance < 150) {
+                mouseInfluence.normalize().multiplyScalar(-0.5);
+                bird.acceleration.add(mouseInfluence);
+            }
+
+            // Update velocity and position
+            bird.velocity.add(bird.acceleration);
+            bird.velocity.normalize().multiplyScalar(params.speed);
+            bird.position.add(bird.velocity.clone().multiplyScalar(delta));
+
+            // Keep within bounds
+            if (bird.position.x < -BOUNDS) bird.position.x = BOUNDS;
+            if (bird.position.x > BOUNDS) bird.position.x = -BOUNDS;
+            if (bird.position.y < -BOUNDS) bird.position.y = BOUNDS;
+            if (bird.position.y > BOUNDS) bird.position.y = -BOUNDS;
+            if (bird.position.z < -BOUNDS) bird.position.z = BOUNDS;
+            if (bird.position.z > BOUNDS) bird.position.z = -BOUNDS;
+
+            // Reset acceleration
+            bird.acceleration.set(0, 0, 0);
+
+            // Update rotation to face direction of movement
+            bird.rotation.y = Math.atan2(-bird.velocity.z, bird.velocity.x);
+            bird.rotation.z = Math.asin(bird.velocity.y / params.speed);
+        }
+
+        function animate() {
+            requestAnimationFrame(animate);
+
+            const delta = 0.016; // Assuming 60fps
+            birds.forEach(bird => updateBird(bird, delta));
+
+            controls.update();
+            renderer.render(scene, camera);
+        }
+    </script>
+</body>
+</html>
